@@ -1,0 +1,5 @@
+# Test dependencies — points at the parent for in-repo development.
+# Production users add `chereda = "0.1.0"` to their seeds list and
+# the registry resolver does the right thing.
+[seeds]
+chereda = { path = ".." }

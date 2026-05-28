@@ -1,0 +1,101 @@
+use chereda :open
+use std.db :open
+use std.test :open
+
+;; Each test boots a fresh in-memory SQLite DB via chereda-init so
+;; cases don't bleed into each other.
+
+fn run-enqueue-dequeue ::: Db Console Queue
+  =>
+  chereda-init ":memory:"
+  with default-queue
+    enqueue "jobs" "payload-a" ""
+    msg := try-dequeue "jobs"
+    assert-eq true (get "ok" msg)
+    assert-eq "payload-a" (get "payload" msg)
+
+fn run-empty-topic ::: Db Console Queue
+  =>
+  chereda-init ":memory:"
+  with default-queue
+    msg := try-dequeue "jobs"
+    assert-eq false (get "ok" msg)
+
+fn run-fifo ::: Db Console Queue
+  =>
+  chereda-init ":memory:"
+  with default-queue
+    enqueue "jobs" "first" ""
+    enqueue "jobs" "second" ""
+    enqueue "jobs" "third" ""
+    m1 := try-dequeue "jobs"
+    m2 := try-dequeue "jobs"
+    m3 := try-dequeue "jobs"
+    assert-eq "first" (get "payload" m1)
+    assert-eq "second" (get "payload" m2)
+    assert-eq "third" (get "payload" m3)
+
+fn run-dedup-drop-repeat ::: Db Console Queue
+  =>
+  chereda-init ":memory:"
+  with default-queue
+    enqueue "jobs" "p1" "key-a"
+    enqueue "jobs" "p2" "key-a"
+    enqueue "jobs" "p3" "key-b"
+    assert-eq 2 (queue-len "jobs")
+
+fn run-empty-dedup-no-drop ::: Db Console Queue
+  =>
+  chereda-init ":memory:"
+  with default-queue
+    enqueue "jobs" "same" ""
+    enqueue "jobs" "same" ""
+    enqueue "jobs" "same" ""
+    assert-eq 3 (queue-len "jobs")
+
+fn run-ack-drops ::: Db Console Queue
+  =>
+  chereda-init ":memory:"
+  with default-queue
+    enqueue "jobs" "p1" ""
+    msg := try-dequeue "jobs"
+    assert-eq 0 (queue-len "jobs")
+    ack (get "id" msg)
+    assert-eq 0 (queue-len "jobs")
+
+fn run-nack-requeues ::: Db Console Queue
+  =>
+  chereda-init ":memory:"
+  with default-queue
+    enqueue "jobs" "p1" ""
+    msg := try-dequeue "jobs"
+    nack (get "id" msg)
+    assert-eq 1 (queue-len "jobs")
+    msg2 := try-dequeue "jobs"
+    assert-eq "p1" (get "payload" msg2)
+
+fn run-topic-partition ::: Db Console Queue
+  =>
+  chereda-init ":memory:"
+  with default-queue
+    enqueue "jobs"   "a" ""
+    enqueue "events" "x" ""
+    enqueue "jobs"   "b" ""
+    assert-eq 2 (queue-len "jobs")
+    assert-eq 1 (queue-len "events")
+    msg := try-dequeue "events"
+    assert-eq "x" (get "payload" msg)
+    assert-eq 2 (queue-len "jobs")
+
+results := #[
+  (test "enqueue + try-dequeue round-trips a single message" run-enqueue-dequeue)
+  (test "empty topic returns ok=false"                       run-empty-topic)
+  (test "FIFO within a topic"                                run-fifo)
+  (test "dedup-key drops repeat enqueues"                    run-dedup-drop-repeat)
+  (test "empty dedup-key never dedups"                       run-empty-dedup-no-drop)
+  (test "ack drops from queue-len once dequeued"             run-ack-drops)
+  (test "nack returns to queued"                             run-nack-requeues)
+  (test "topics are independent partitions"                  run-topic-partition)
+]
+
+summarize results

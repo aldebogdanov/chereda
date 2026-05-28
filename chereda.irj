@@ -1,0 +1,165 @@
+mod chereda
+
+;; chereda — Queue effect for Irij.
+;;
+;; SQLite-backed at-least-once delivery with optional dedup keys.
+;; The queue is durable across restarts (rows persist in the SQLite
+;; DB), workers receive each message at least once, and producers
+;; can opt into idempotency by passing a non-empty dedup-key on
+;; enqueue (UNIQUE index on (topic, dedup_key) drops duplicates
+;; via INSERT OR IGNORE).
+;;
+;; Usage:
+;;
+;;   use chereda :open
+;;
+;;   chereda-init "/var/lib/myapp/queue.db"
+;;
+;;   with default-queue
+;;     enqueue "jobs" (json-encode {kind= "resize" path= "/foo"}) ""
+;;     enqueue "jobs" (json-encode {kind= "resize" path= "/foo"}) "resize-foo"  ;; dedup
+;;     msg := try-dequeue "jobs"
+;;     if (get "ok" msg)
+;;       handle-and-ack (get "id" msg) (get "payload" msg)
+;;     else
+;;       ()
+;;
+;; ----------------------------------------------------------------
+;; At-least-once semantics: a message may be delivered more than
+;; once if the worker crashes between `try-dequeue` and `ack`. Make
+;; workers idempotent; the dedup-key on enqueue handles the
+;; producer side of double-fire.
+;; ----------------------------------------------------------------
+
+use std.db :open
+
+;; ── Module-level connection ──────────────────────────────────────
+;;
+;; The default handler reads its conn from this mut. `chereda-init`
+;; opens the DB, creates the schema, and binds the conn here. Tests
+;; or alternative deployments can roll a custom handler that uses
+;; a different conn — see `make-queue-handler` (TODO 0.2.0).
+
+chereda-conn :! ()
+
+;; ── Schema ───────────────────────────────────────────────────────
+;;
+;; chereda_msgs
+;;   id           PK, monotonically increasing — used as the dequeue
+;;                tiebreaker (FIFO within a topic).
+;;   topic        partition key. Workers dequeue per topic.
+;;   payload      opaque Str — encode whatever the producer wants
+;;                (JSON, base64, etc.).
+;;   dedup_key    optional. UNIQUE(topic, dedup_key) drops duplicate
+;;                enqueues for the same key. NULL values aren't
+;;                constrained (SQLite treats NULLs as distinct).
+;;   status       queued | inflight | done
+;;   enqueued_at, picked_at  ISO datetimes for ops/debug.
+
+pub fn chereda-init :: Str () ::: Console
+  => path
+  with default-db
+    conn := db-open path
+    db-exec conn "CREATE TABLE IF NOT EXISTS chereda_msgs (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT NOT NULL, payload TEXT NOT NULL, dedup_key TEXT, status TEXT NOT NULL DEFAULT 'queued', enqueued_at TEXT NOT NULL DEFAULT (datetime('now')), picked_at TEXT, UNIQUE(topic, dedup_key))" #[]
+    db-exec conn "CREATE INDEX IF NOT EXISTS idx_chereda_topic_status ON chereda_msgs(topic, status)" #[]
+    chereda-conn <- conn
+  println ("chereda initialized at " ++ path)
+
+;; ── Effect surface ───────────────────────────────────────────────
+
+pub effect Queue
+  ;; Push a message. `dedup-key` empty → always insert. Non-empty →
+  ;; INSERT OR IGNORE against UNIQUE(topic, dedup-key); duplicate
+  ;; enqueues are silently dropped within the same topic.
+  enqueue     :: Str Str Str ()
+  ;; Try to pop the next queued message. Returns:
+  ;;   {ok= true id= <int> payload= <str>}    on success
+  ;;   {ok= false}                            when empty
+  ;; Move the row from queued → inflight; the worker must `ack` it
+  ;; on success or `nack` to requeue.
+  try-dequeue :: Str Map
+  ;; Mark inflight → done. Idempotent — already-done rows stay done.
+  ack         :: Int ()
+  ;; Mark inflight → queued (requeue at tail-ish position; same id).
+  nack        :: Int ()
+  ;; Count of queued (not inflight, not done) messages in a topic.
+  queue-len   :: Str Int
+
+;; ── Default handler ──────────────────────────────────────────────
+;;
+;; Each arm:
+;;   1. performs the SQL through std.db (which is why this handler
+;;      requires `::: Db`)
+;;   2. resumes once with the resulting value or ()
+;;
+;; The handler is single-resume: no continuation capture, no
+;; multi-shot semantics. That's enough for the queue surface;
+;; reactive-style multi-emission lives in butterfly (planned).
+
+pub handler default-queue :: Queue
+  enqueue topic payload dedup-key =>
+    chereda-do-enqueue chereda-conn topic payload dedup-key
+    resume ()
+  try-dequeue topic =>
+    resume (chereda-do-try-dequeue chereda-conn topic)
+  ack id =>
+    chereda-do-ack chereda-conn id
+    resume ()
+  nack id =>
+    chereda-do-nack chereda-conn id
+    resume ()
+  queue-len topic =>
+    resume (chereda-do-queue-len chereda-conn topic)
+
+;; ── SQL primitives ───────────────────────────────────────────────
+;;
+;; Pulled out of the handler arms so the with-block + tail-if-else
+;; bug pattern (fixed in v0.8.4 but worth dodging anyway) can't
+;; bite again. Each helper returns its value cleanly.
+
+fn chereda-do-enqueue :: _ Str Str Str ()
+  => conn topic payload dedup-key
+  with default-db
+    if (dedup-key == "")
+      db-exec conn "INSERT INTO chereda_msgs (topic, payload, dedup_key) VALUES (?, ?, NULL)" #[topic payload]
+    else
+      db-exec conn "INSERT OR IGNORE INTO chereda_msgs (topic, payload, dedup_key) VALUES (?, ?, ?)" #[topic payload dedup-key]
+
+fn chereda-do-try-dequeue :: _ Str Map
+  => conn topic
+  with default-db
+    rows := db-query conn "SELECT id, payload FROM chereda_msgs WHERE topic = ? AND status = 'queued' ORDER BY id LIMIT 1" #[topic]
+    chereda-finish-dequeue conn rows
+
+fn chereda-finish-dequeue :: _ _ Map
+  => conn rows
+  if (empty? rows)
+    {ok= false}
+  else
+    chereda-mark-inflight conn (head rows)
+
+fn chereda-mark-inflight :: _ _ Map
+  => conn row
+  id := get "id" row
+  payload := get "payload" row
+  with default-db
+    db-exec conn "UPDATE chereda_msgs SET status = 'inflight', picked_at = datetime('now') WHERE id = ?" #[id]
+  {ok= true id= id payload= payload}
+
+fn chereda-do-ack :: _ Int ()
+  => conn id
+  with default-db
+    db-exec conn "UPDATE chereda_msgs SET status = 'done' WHERE id = ? AND status = 'inflight'" #[id]
+  ()
+
+fn chereda-do-nack :: _ Int ()
+  => conn id
+  with default-db
+    db-exec conn "UPDATE chereda_msgs SET status = 'queued', picked_at = NULL WHERE id = ? AND status = 'inflight'" #[id]
+  ()
+
+fn chereda-do-queue-len :: _ Str Int
+  => conn topic
+  with default-db
+    rows := db-query conn "SELECT COUNT(*) AS n FROM chereda_msgs WHERE topic = ? AND status = 'queued'" #[topic]
+    get "n" (head rows)
