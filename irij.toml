@@ -1,6 +1,6 @@
 [project]
 name = "chereda"
-version = "0.1.0"
+version = "0.1"
 description = "Queue effect for Irij — SQLite-backed at-least-once with optional dedup key"
 author = "aldebogdanov"
 license = "MIT"
