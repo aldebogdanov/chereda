@@ -56,7 +56,7 @@ chereda-conn :! ()
 ;;   status       queued | inflight | done
 ;;   enqueued_at, picked_at  ISO datetimes for ops/debug.
 
-pub fn chereda-init :: Str () ::: Console
+pub fn chereda-init :: Str () ::: Console Db
   => path
   with default-db
     conn := db-open path
@@ -88,15 +88,15 @@ pub effect Queue
 ;; ── Default handler ──────────────────────────────────────────────
 ;;
 ;; Each arm:
-;;   1. performs the SQL through std.db (which is why this handler
-;;      requires `::: Db`)
+;;   1. performs the SQL through std.db, so the handler declares
+;;      `::: Db` and whoever installs it does too
 ;;   2. resumes once with the resulting value or ()
 ;;
 ;; The handler is single-resume: no continuation capture, no
 ;; multi-shot semantics. That's enough for the queue surface;
 ;; reactive-style multi-emission lives in butterfly (planned).
 
-pub handler default-queue :: Queue
+pub handler default-queue :: Queue ::: Db
   enqueue topic payload dedup-key =>
     chereda-do-enqueue chereda-conn topic payload dedup-key
     resume ()
@@ -117,7 +117,7 @@ pub handler default-queue :: Queue
 ;; bug pattern (fixed in v0.8.4 but worth dodging anyway) can't
 ;; bite again. Each helper returns its value cleanly.
 
-fn chereda-do-enqueue :: _ Str Str Str ()
+fn chereda-do-enqueue :: _ Str Str Str () ::: Db
   => conn topic payload dedup-key
   with default-db
     if (dedup-key == "")
@@ -125,20 +125,20 @@ fn chereda-do-enqueue :: _ Str Str Str ()
     else
       db-exec conn "INSERT OR IGNORE INTO chereda_msgs (topic, payload, dedup_key) VALUES (?, ?, ?)" #[topic payload dedup-key]
 
-fn chereda-do-try-dequeue :: _ Str Map
+fn chereda-do-try-dequeue :: _ Str Map ::: Db
   => conn topic
   with default-db
     rows := db-query conn "SELECT id, payload FROM chereda_msgs WHERE topic = ? AND status = 'queued' ORDER BY id LIMIT 1" #[topic]
     chereda-finish-dequeue conn rows
 
-fn chereda-finish-dequeue :: _ _ Map
+fn chereda-finish-dequeue :: _ _ Map ::: Db
   => conn rows
   if (empty? rows)
     {ok= false}
   else
     chereda-mark-inflight conn (head rows)
 
-fn chereda-mark-inflight :: _ _ Map
+fn chereda-mark-inflight :: _ _ Map ::: Db
   => conn row
   id := get "id" row
   payload := get "payload" row
@@ -146,19 +146,19 @@ fn chereda-mark-inflight :: _ _ Map
     db-exec conn "UPDATE chereda_msgs SET status = 'inflight', picked_at = datetime('now') WHERE id = ?" #[id]
   {ok= true id= id payload= payload}
 
-fn chereda-do-ack :: _ Int ()
+fn chereda-do-ack :: _ Int () ::: Db
   => conn id
   with default-db
     db-exec conn "UPDATE chereda_msgs SET status = 'done' WHERE id = ? AND status = 'inflight'" #[id]
   ()
 
-fn chereda-do-nack :: _ Int ()
+fn chereda-do-nack :: _ Int () ::: Db
   => conn id
   with default-db
     db-exec conn "UPDATE chereda_msgs SET status = 'queued', picked_at = NULL WHERE id = ? AND status = 'inflight'" #[id]
   ()
 
-fn chereda-do-queue-len :: _ Str Int
+fn chereda-do-queue-len :: _ Str Int ::: Db
   => conn topic
   with default-db
     rows := db-query conn "SELECT COUNT(*) AS n FROM chereda_msgs WHERE topic = ? AND status = 'queued'" #[topic]
