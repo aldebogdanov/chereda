@@ -47,6 +47,11 @@ effect Queue
   queue-len   :: Str Int            ;; count of `queued` rows
 ```
 
+`default-queue :: Queue ::: Db` keeps messages in SQLite through std.db,
+so a function that installs it declares `::: Db` (as `chereda-init`,
+`::: Console Db`, does); code that only enqueues and dequeues declares
+`::: Queue`. chereda has no Java of its own.
+
 ## Semantics
 
 - **At-least-once.** A message is dequeued (queued → inflight) and held until

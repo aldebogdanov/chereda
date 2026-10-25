@@ -4,3 +4,8 @@ version = "0.1"
 description = "Queue effect for Irij — SQLite-backed at-least-once with optional dedup key"
 author = "aldebogdanov"
 license = "MIT"
+
+[trust]
+# chereda reaches SQLite only through std.db: no Java of its own.
+caps = []
+jvm = []
