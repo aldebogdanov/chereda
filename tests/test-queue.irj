@@ -1,5 +1,5 @@
 use chereda :open
-use std.db :open
+use std.jdbc :open
 use std.test :open
 
 ;; Each test boots a fresh in-memory SQLite DB via chereda-init so

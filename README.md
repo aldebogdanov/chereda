@@ -8,14 +8,22 @@ Queue effect for Irij. SQLite-backed. At-least-once delivery with optional dedup
 
 ```toml
 [seeds]
-chereda = "0.1.0"
+chereda = "0.2"
+```
+
+chereda brings SQLite's JDBC driver (its irij.toml `[jvm]`); Irij 0.11+
+fetches it. If your irij.toml has a `[trust]` section, allow it:
+
+```toml
+[trust]
+jars = ["chereda"]
 ```
 
 ## Use
 
 ```irij
 use chereda :open
-use std.db :open
+use std.jdbc :open
 
 ;; One-time at startup. Opens the SQLite DB, creates schema, binds
 ;; the connection to chereda's internal slot.
@@ -47,7 +55,7 @@ effect Queue
   queue-len   :: Str Int            ;; count of `queued` rows
 ```
 
-`default-queue :: Queue ::: Db` keeps messages in SQLite through std.db,
+`default-queue :: Queue ::: Db` keeps messages in SQLite through std.jdbc,
 so a function that installs it declares `::: Db` (as `chereda-init`,
 `::: Console Db`, does); code that only enqueues and dequeues declares
 `::: Queue`. chereda has no Java of its own.

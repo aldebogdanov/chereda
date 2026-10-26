@@ -1,11 +1,17 @@
 [project]
 name = "chereda"
-version = "0.1"
+version = "0.2"
 description = "Queue effect for Irij — SQLite-backed at-least-once with optional dedup key"
 author = "aldebogdanov"
 license = "MIT"
 
+# SQLite's JDBC driver. Irij bundles none since 0.11; std.jdbc finds it.
+# A project using chereda with a [trust] section allows it with
+# jars = ["chereda"].
+[jvm]
+"org.xerial:sqlite-jdbc" = "3.53.4.0"
+
 [trust]
-# chereda reaches SQLite only through std.db: no Java of its own.
+# chereda reaches SQLite only through std.jdbc: no Java of its own.
 caps = []
 jvm = []
