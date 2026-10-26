@@ -31,7 +31,7 @@ mod chereda
 ;; producer side of double-fire.
 ;; ----------------------------------------------------------------
 
-use std.db :open
+use std.jdbc :open
 
 ;; ── Module-level connection ──────────────────────────────────────
 ;;
@@ -59,7 +59,7 @@ chereda-conn :! ()
 pub fn chereda-init :: Str () ::: Console Db
   => path
   with default-db
-    conn := db-open path
+    conn := db-open ("jdbc:sqlite:" ++ path)
     db-exec conn "CREATE TABLE IF NOT EXISTS chereda_msgs (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT NOT NULL, payload TEXT NOT NULL, dedup_key TEXT, status TEXT NOT NULL DEFAULT 'queued', enqueued_at TEXT NOT NULL DEFAULT (datetime('now')), picked_at TEXT, UNIQUE(topic, dedup_key))" #[]
     db-exec conn "CREATE INDEX IF NOT EXISTS idx_chereda_topic_status ON chereda_msgs(topic, status)" #[]
     chereda-conn <- conn
@@ -88,7 +88,7 @@ pub effect Queue
 ;; ── Default handler ──────────────────────────────────────────────
 ;;
 ;; Each arm:
-;;   1. performs the SQL through std.db, so the handler declares
+;;   1. performs the SQL through std.jdbc, so the handler declares
 ;;      `::: Db` and whoever installs it does too
 ;;   2. resumes once with the resulting value or ()
 ;;
